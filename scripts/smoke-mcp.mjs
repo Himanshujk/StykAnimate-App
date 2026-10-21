@@ -103,6 +103,32 @@ try {
   assert.equal((await hero()).x, 123);
   await call('run_js', { code: 'window.styk.editor.undo();' });
   assert.equal((await hero()).x, 200);
+  // Captions fade in and out between ticks, split keyframes without changing the motion, and survive a round trip.
+  const captioned = json(await call('build_animation', {
+    background: '#ffffff', easing: 'linear', figures: [{ id: 'hero', color: '#0d99ff' }],
+    captions: [{ text: 'Hello!', from: 3, to: 8, fade: 2 }],
+    frames: [{ duration: 10, camera: { x: 0, y: 0 }, poses: { hero: { pose: 'stand', x: 100 } } }, { duration: 1, camera: { x: 100 }, poses: { hero: { x: 300 } } }],
+  }));
+  assert.equal(captioned.ticks, 11);
+  assert.equal(captioned.frames, 6, 'ticks 3, 5, 6 and 8 became keyframes');
+  const sample = async tick => json(await call('run_js', { code: `
+    const e = window.styk.editor; e.seek(${tick});
+    const object = e.selectionFrame.objects.find(item => item.figure_type_id === 2);
+    const width = e.report.figure_types[1].segments[0].length;
+    return { hero: e.selectionFrame.objects.find(item => item.figure_type_id === 1).root_x, caption: 1 - object.field28 / 255,
+      screenCenter: object.root_x + width / 2 * object.scale - e.selectionFrame.camera.x };` }));
+  assert.equal((await sample(2)).caption, 0);
+  assert.ok(Math.abs((await sample(4)).caption - 0.5) < 0.01, 'half faded in at tick 4');
+  assert.equal((await sample(6)).caption, 1);
+  assert.ok(Math.abs((await sample(7)).caption - 0.5) < 0.01, 'half faded out at tick 7');
+  assert.equal((await sample(9)).caption, 0);
+  for (const tick of [3, 6, 7]) assert.ok(Math.abs((await sample(tick)).screenCenter - 480) < 0.01, `caption stays centered on screen at tick ${tick}`);
+  for (const tick of [3, 5, 7]) assert.ok(Math.abs((await sample(tick)).hero - (100 + 20 * tick)) < 0.01, `linear motion kept at tick ${tick}`);
+  const captionedSpec = json(await call('get_animation'));
+  assert.equal(captionedSpec.figures.at(-1).text, 'Hello!');
+  await call('build_animation', captionedSpec);
+  assert.deepEqual(json(await call('get_animation')), captionedSpec);
+
   console.log(`MCP smoke passed; files in ${output}`);
 } finally {
   child.stdin.end();

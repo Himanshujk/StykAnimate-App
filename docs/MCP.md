@@ -50,6 +50,10 @@ Example: a walk is `walk_contact_a`, `walk_pass_a`, `walk_contact_b`, `walk_pass
 
 A text figure's words are fixed, so a caption is one text figure that is hidden with `opacity: 0` and shown with `opacity: 1`; list captions last so they draw in front. A frame with easing `constant` cuts instantly, any other easing fades over the frame's duration. Pose `x` is the left edge of the text block unless `anchor` is `center` or `right`, and `y` is the bottom of the lettering. `alignment` only aligns the lines of a multiline block (`\n`) to each other. Characters outside the bundled font's Latin range are replaced.
 
+### Captions
+
+`captions: [{text, from, to, fade, x, y, fontSize, color, bold, italic, outlineWidth, outlineColor}]` adds subtitles without hand-built text figures. `from` and `to` are timeline ticks (`to` omitted keeps the caption to the end), `fade` is the fade length in ticks (default 4, 1 is a near-instant cut), `x` is the horizontal center and `y` the bottom of the lettering in screen pixels (defaults: canvas center, 40 px above the bottom). Each caption becomes a text figure named `caption_N` drawn in front of everything else, with its fade keys. Where a fade starts or ends inside a keyframe segment, that segment is split at the exact tick using the pose the animation has there, so linear motion is unchanged (with `auto` easing the curve through the new key is close but not identical). Captions stay put on screen when the camera pans or zooms; camera rotation is not compensated. `get_animation` returns the expanded form, text figures and extra keyframes with no `captions` field, and that spec rebuilds the same animation.
+
 ## Limits
 
 - `build_animation` replaces the open document through `editor.load`, so it is not undoable. For undoable in-place edits use `run_js` with `editor.selectFrame(i)` and `editor.transaction(label, frame => …)`. Loaded documents run on the layer sheet, so read the current pose from `editor.selectionFrame`, not `editor.frame` (`get_state` does). Frame add, delete and retime commands do not map cleanly onto the layer sheet, which is why edits go through `get_animation`.

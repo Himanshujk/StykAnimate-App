@@ -99,7 +99,23 @@ async function buildInPage({ spec, joints: JOINTS }) {
   if (spec.background) report.backgrounds = [{ background_id: 1, kind: 2, color: argb(spec.background), name: 'Background' }];
   report._styk.name = spec.name ?? 'Claude animation';
 
-  const figures = spec.figures?.length ? spec.figures : [{ id: 'figure' }];
+  // Each caption becomes a text figure (listed last, so in front) that is hidden until its keyed fade-in.
+  const captions = (spec.captions ?? []).map((caption, index) => ({ ...caption, id: `caption_${index + 1}` }));
+  const figures = [
+    ...(spec.figures?.length || captions.length ? spec.figures ?? [] : [{ id: 'figure' }]),
+    ...captions.map(caption => ({
+      id: caption.id, kind: 'text', text: caption.text, fontSize: caption.fontSize ?? 36, color: caption.color ?? '#222222',
+      bold: caption.bold, italic: caption.italic, alignment: 'center', anchor: 'center',
+      outlineWidth: caption.outlineWidth, outlineColor: caption.outlineColor,
+    })),
+  ];
+  const frames = spec.frames.map((frame, index) => index ? frame : {
+    ...frame,
+    poses: {
+      ...Object.fromEntries(captions.map(caption => [caption.id, { x: caption.x ?? (spec.width ?? 960) / 2, y: caption.y ?? (spec.height ?? 540) - 40, opacity: 0 }])),
+      ...frame.poses,
+    },
+  });
   const ids = new Map();
   // A prop is a single segment: a line (length, angle) or a filled circle (radius = length / 2).
   const segment = (extra, figure) => ({
@@ -140,7 +156,7 @@ async function buildInPage({ spec, joints: JOINTS }) {
   }]));
   // The native camera is an offset of the view's center from the canvas center, with scale as zoom.
   const camera = { x: 0, y: 0, zoom: 1, angle: 0, used: false };
-  report.keyframes = spec.frames.map((frame, frameIndex) => {
+  report.keyframes = frames.map((frame, frameIndex) => {
     for (const [name, value] of Object.entries(frame.camera ?? {})) {
       if (!(name in camera) || name === 'used') throw new Error(`Frame ${frameIndex}: unknown camera field "${name}". Fields: x, y, zoom, angle`);
       camera[name] = value;
@@ -176,6 +192,58 @@ async function buildInPage({ spec, joints: JOINTS }) {
     key._styk = { easing: { interpolation: frame.easing ?? spec.easing ?? 'auto' } };
     return key;
   });
+
+  if (captions.length) {
+    const { evaluatedFrame, timeline } = await import('/src/pivot/geometry.mjs');
+    const ticksOf = () => timeline(report).map(entry => entry);
+    const end = () => ticksOf().at(-1).start;
+    // Splits the keyframe segment holding `tick` so a key exists exactly there, with the pose the animation has at that tick.
+    const split = tick => {
+      const entries = ticksOf();
+      const at = entries.findIndex((entry, i) => i < entries.length - 1 && entry.start < tick && tick < entry.start + entry.count);
+      if (at < 0) return;
+      const { start, count } = entries[at];
+      const evaluated = evaluatedFrame(report, at, (tick - start) / count, tick);
+      const key = structuredClone({ ...evaluated, objects: [] });
+      for (const { runtime_segments, ...object } of evaluated.objects) key.objects.push(structuredClone(object));
+      key.duration_raw = start + count - tick;
+      key._styk = { easing: structuredClone(report.keyframes[at]._styk?.easing ?? { interpolation: 'auto' }) };
+      report.keyframes[at].duration_raw = tick - start;
+      report.keyframes.splice(at + 1, 0, key);
+    };
+    const plans = captions.map(caption => {
+      const from = Math.round(caption.from ?? 0);
+      const to = caption.to === undefined ? undefined : Math.round(caption.to);
+      if (to !== undefined && to - from < 2) throw new Error(`${caption.id}: "to" must be at least 2 ticks after "from"`);
+      const fade = Math.max(1, Math.min(Math.round(caption.fade ?? 4), to === undefined ? Infinity : Math.floor((to - from) / 2)));
+      return { id: caption.id, from, to, fade };
+    });
+    const limit = end();
+    for (const plan of plans) {
+      const wanted = [plan.from, plan.from + plan.fade, ...(plan.to === undefined ? [] : [plan.to - plan.fade, plan.to])];
+      for (const tick of wanted) if (tick > 0 && tick < limit) split(tick);
+    }
+    const opacityAt = (plan, tick) => {
+      if (tick <= plan.from) return 0;
+      if (tick < plan.from + plan.fade) return (tick - plan.from) / plan.fade;
+      if (plan.to === undefined || tick <= plan.to - plan.fade) return 1;
+      return tick < plan.to ? (plan.to - tick) / plan.fade : 0;
+    };
+    const entries = ticksOf();
+    for (const [position, plan] of plans.entries()) {
+      const typeId = ids.get(plan.id), width = report.figure_types[typeId - 1].segments[0].length;
+      const screenX = captions[position].x ?? report.canvas_width / 2, screenY = captions[position].y ?? report.canvas_height - 40;
+      report.keyframes.forEach((key, index) => {
+        const object = key.objects.find(item => item.figure_type_id === typeId);
+        object.field28 = Math.round(255 * (1 - opacityAt(plan, entries[index].start)));
+        // Subtitles stay put on screen: undo the camera's pan and zoom (rotation is not compensated).
+        const cam = key.camera && !key.camera.is_default ? key.camera : { x: 0, y: 0, scale: 1 };
+        object.scale = 1 / cam.scale;
+        object.root_x = report.canvas_width / 2 + cam.x + (screenX - report.canvas_width / 2) / cam.scale - width / 2 * object.scale;
+        object.root_y = report.canvas_height / 2 + cam.y + (screenY - report.canvas_height / 2) / cam.scale;
+      });
+    }
+  }
 
   const { editor } = window.styk;
   editor.load(report, report._styk.name);
@@ -298,7 +366,7 @@ const tools = [
       'Rest pose: torso -90, head -90, l_upper_arm 60, l_forearm 76, r_upper_arm 120, r_forearm 104, l_thigh 64, l_shin 87, r_thigh 116, r_shin 93.',
       'A figure not mentioned in a frame, or a joint/x/y/scale not mentioned, keeps its value from the previous frame. x,y is the hip/root position in canvas pixels; standing feet are 129 px x scale below the hip (so hip y = ground y - 129 x scale), the head top about 122 px x scale above it.',
       'Figures are stick figures by default; kind "line" (length, angle in degrees, set per frame with pose.angle) and kind "circle" (radius) make props such as a ground line or a ball, positioned by x,y (a line starts at x,y, a circle is centered there). Figures listed later draw in front.',
-      'Kind "text" (text, fontSize, color, bold, italic, alignment, anchor) draws words in the bundled Noto Sans. Pose x is the left edge of the block unless anchor is "center" or "right", and y is the bottom of the lettering. Text cannot change, so make one text figure per caption and show it with pose.opacity (0 hides, 1 shows; a frame with easing "constant" cuts instantly, other easings fade). List captions last so they draw in front.',
+      'Kind "text" (text, fontSize, color, bold, italic, alignment, anchor) draws words in the bundled Noto Sans. Pose x is the left edge of the block unless anchor is "center" or "right", and y is the bottom of the lettering. Text cannot change, so make one text figure per caption and show it with pose.opacity (0 hides, 1 shows; a frame with easing "constant" cuts instantly, other easings fade). For subtitles use `captions` instead: [{text, from, to, fade}] in ticks, which adds the text figure, the fade keys and any keyframes it needs for you (frames are split at exact ticks without changing the motion; y defaults to near the bottom, x to the center).',
       'A frame may set `camera` {x, y, zoom, angle}: x,y shift the view center from the canvas center in pixels (0,0 shows the whole canvas, positive x looks right), zoom 1 is the full canvas, 2 is twice as close, angle in degrees. Camera values also carry over.',
     ].join(' '),
     inputSchema: {
@@ -310,6 +378,26 @@ const tools = [
         fps: { type: 'integer', description: 'Frames per second, default 24.' },
         background: { type: 'string', description: 'Hex color such as "#ffffff". Default is the editor background.' },
         easing: { type: 'string', enum: ['auto', 'linear', 'ease-in', 'ease-out', 'constant'], description: 'Default interpolation to the next keyframe.' },
+        captions: {
+          type: 'array',
+          description: 'Subtitles shown between two timeline ticks. Each becomes a text figure, fades in and out, and the keyframes it needs are inserted for you without changing the motion.',
+          items: {
+            type: 'object',
+            properties: {
+              text: { type: 'string', description: '\\n starts a new line.' },
+              from: { type: 'integer', description: 'Tick where the fade-in starts, default 0.' },
+              to: { type: 'integer', description: 'Tick where the fade-out ends; omit to keep it to the end.' },
+              fade: { type: 'integer', description: 'Fade length in ticks, default 4; 1 is a near-instant cut.' },
+              x: { type: 'number', description: 'Horizontal center, default the canvas center.' },
+              y: { type: 'number', description: 'Bottom of the lettering, default 40 px above the canvas bottom.' },
+              fontSize: { type: 'number', description: 'Default 36.' },
+              color: { type: 'string', description: 'Hex, default "#222222".' },
+              bold: { type: 'boolean' }, italic: { type: 'boolean' },
+              outlineWidth: { type: 'number' }, outlineColor: { type: 'string' },
+            },
+            required: ['text'],
+          },
+        },
         figures: {
           type: 'array',
           items: {
