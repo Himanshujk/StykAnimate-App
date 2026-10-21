@@ -12,6 +12,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { chromium } from '../tests/support/playwright.mjs';
+import { JOINTS, POSES, resolveSpec } from './mcp-poses.mjs';
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const url = process.env.STYK_URL || 'http://127.0.0.1:47831';
@@ -82,10 +83,9 @@ async function copyTo(temp, destination) {
 // ---- page-side builders ---------------------------------------------------
 
 /** Runs in the page. Builds a classic keyframe document from the spec and loads it. */
-async function buildInPage(spec) {
+async function buildInPage({ spec, joints: JOINTS }) {
   const { emptyDocument, createFrame, createObject } = await import('/src/demo.mjs');
   const { createBlueStartupPose } = await import('/src/startup-blue-data.mjs');
-  const JOINTS = ['torso', 'head', 'l_upper_arm', 'l_forearm', 'r_upper_arm', 'r_forearm', 'l_thigh', 'l_shin', 'r_thigh', 'r_shin'];
   const base = createBlueStartupPose().figure;
   const restAngles = base.segments.map(segment => segment.angle_rad);
   const rad = degrees => degrees * Math.PI / 180;
@@ -154,9 +154,8 @@ async function buildInPage(spec) {
   }
 }
 
-const readStateInPage = () => {
+const readStateInPage = JOINTS => {
   const { editor } = window.styk;
-  const JOINTS = ['torso', 'head', 'l_upper_arm', 'l_forearm', 'r_upper_arm', 'r_forearm', 'l_thigh', 'l_shin', 'r_thigh', 'r_shin'];
   return {
     name: editor.name,
     dirty: editor.dirty,
@@ -175,6 +174,47 @@ const readStateInPage = () => {
     })),
   };
 };
+
+/** Runs in the page. Reads the live document back as a build_animation spec (values equal to the previous frame are omitted). */
+function readAnimationInPage(JOINTS) {
+  const { editor } = window.styk;
+  const report = editor.report, saved = { frame: editor.frameIndex, tick: editor.tick };
+  const hex = rgb => `#${rgb.map(value => value.toString(16).padStart(2, '0')).join('')}`;
+  const round = value => Math.round(value * 10) / 10;
+  const figures = report.figure_types.map(figure => ({
+    id: figure.name,
+    ...(figure.segments[0]?.color_rgb ? { color: hex(figure.segments[0].color_rgb) } : {}),
+  }));
+  const background = report.backgrounds?.find(item => item.kind === 2);
+  const previous = new Map();
+  const frames = editor.timeline.map((entry, index) => {
+    editor.selectFrame(index);
+    const poses = {};
+    for (const object of editor.selectionFrame.objects) {
+      const name = report.figure_types.find(figure => figure.figure_type_id === object.figure_type_id)?.name;
+      const now = { x: round(object.root_x), y: round(object.root_y), scale: round(object.scale), joints: {} };
+      JOINTS.forEach((joint, slot) => { now.joints[joint] = round(object.angles[slot] * 180 / Math.PI); });
+      const last = previous.get(name);
+      const pose = {};
+      for (const key of ['x', 'y', 'scale']) if (!last || last[key] !== now[key]) pose[key] = now[key];
+      const joints = Object.fromEntries(JOINTS.filter(joint => !last || last.joints[joint] !== now.joints[joint]).map(joint => [joint, now.joints[joint]]));
+      if (Object.keys(joints).length) pose.joints = joints;
+      previous.set(name, now);
+      if (Object.keys(pose).length) poses[name] = pose;
+    }
+    return {
+      duration: entry.count,
+      easing: report.keyframes[index]?._styk?.easing?.interpolation ?? 'auto',
+      ...(Object.keys(poses).length ? { poses } : {}),
+    };
+  });
+  editor.seek(saved.tick);
+  return {
+    name: editor.name, width: report.canvas_width, height: report.canvas_height, fps: report.fps,
+    ...(background ? { background: hex([(background.color >> 16) & 255, (background.color >> 8) & 255, background.color & 255]) } : {}),
+    figures, frames,
+  };
+}
 
 // ---- tools ----------------------------------------------------------------
 
@@ -214,10 +254,15 @@ const tools = [
               easing: { type: 'string', enum: ['auto', 'linear', 'ease-in', 'ease-out', 'constant'] },
               poses: {
                 type: 'object',
-                description: 'Map of figure id to {x, y, scale, joints:{jointName: degrees}}.',
+                description: 'Map of figure id to {pose, mirror, x, y, scale, joints:{jointName: degrees}}. `pose` starts from a named pose (see list_poses), `joints` then overrides single angles, and `mirror` flips the result to face left.',
                 additionalProperties: {
                   type: 'object',
-                  properties: { x: { type: 'number' }, y: { type: 'number' }, scale: { type: 'number' }, joints: { type: 'object', additionalProperties: { type: 'number' } } },
+                  properties: {
+                    pose: { type: 'string', enum: Object.keys(POSES) },
+                    mirror: { type: 'boolean' },
+                    x: { type: 'number' }, y: { type: 'number' }, scale: { type: 'number' },
+                    joints: { type: 'object', additionalProperties: { type: 'number' } },
+                  },
                 },
               },
             },
@@ -228,14 +273,26 @@ const tools = [
     },
     async run(args) {
       const page = await editor();
-      return textResult(await page.evaluate(buildInPage, args));
+      return textResult(await page.evaluate(buildInPage, { spec: resolveSpec(args), joints: JOINTS }));
     },
   },
   {
     name: 'get_state',
     description: 'Describe the open document: canvas, fps, frame count, duration, figures, joint names and the current keyframe\'s pose (degrees).',
     inputSchema: { type: 'object', properties: {} },
-    async run() { return textResult(await (await editor()).evaluate(readStateInPage)); },
+    async run() { return textResult(await (await editor()).evaluate(readStateInPage, JOINTS)); },
+  },
+  {
+    name: 'get_animation',
+    description: 'Read the open document back as a build_animation spec (omitting values equal to the previous frame). To change an animation, call this, edit the spec and pass it to build_animation; this is the supported way to add, remove, retime or repose frames.',
+    inputSchema: { type: 'object', properties: {} },
+    async run() { return textResult(await (await editor()).evaluate(readAnimationInPage, JOINTS)); },
+  },
+  {
+    name: 'list_poses',
+    description: 'List the named poses usable as `pose` in build_animation frames, with the joint angles of each (degrees, figure facing right).',
+    inputSchema: { type: 'object', properties: {} },
+    async run() { return textResult(Object.fromEntries(Object.entries(POSES).map(([name, { description, joints }]) => [name, { description, joints }]))); },
   },
   {
     name: 'render_frame',
