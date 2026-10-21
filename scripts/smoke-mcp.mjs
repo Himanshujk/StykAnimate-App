@@ -74,10 +74,11 @@ try {
   const posed = json(await call('build_animation', {
     name: 'poses', background: '#ffffff',
     figures: [{ id: 'ground', kind: 'line', length: 900, color: '#555555' }, { id: 'ball', kind: 'circle', radius: 20, color: '#f0a547' },
-      { id: 'a', color: '#0d99ff' }, { id: 'b', color: '#e63946' }],
+      { id: 'a', color: '#0d99ff' }, { id: 'b', color: '#e63946' },
+      { id: 'title', kind: 'text', text: 'Hi there', fontSize: 40, anchor: 'center', color: '#222222' }],
     frames: [
-      { duration: 6, poses: { ground: { x: 30, y: 420, angle: 0 }, ball: { x: 480, y: 400 }, a: { pose: 'walk_contact_a', x: 200 }, b: { pose: 'walk_contact_a', mirror: true, x: 700 } } },
-      { duration: 6, camera: { x: 100, y: -20, zoom: 1.5, angle: 3 }, poses: { ball: { x: 520 }, a: { pose: 'walk_contact_b', x: 260 }, b: { pose: 'walk_contact_b', mirror: true, x: 640 } } },
+      { duration: 6, poses: { title: { x: 480, y: 80, opacity: 0 }, ground: { x: 30, y: 420, angle: 0 }, ball: { x: 480, y: 400 }, a: { pose: 'walk_contact_a', x: 200 }, b: { pose: 'walk_contact_a', mirror: true, x: 700 } } },
+      { duration: 6, camera: { x: 100, y: -20, zoom: 1.5, angle: 3 }, poses: { title: { opacity: 1 }, ball: { x: 520 }, a: { pose: 'walk_contact_b', x: 260 }, b: { pose: 'walk_contact_b', mirror: true, x: 640 } } },
       { duration: 1 },
     ],
   }));
@@ -86,6 +87,10 @@ try {
   assert.equal(spec.frames.length, 3);
   assert.equal(spec.figures[3].color, '#e63946');
   assert.equal(spec.figures[1].radius, 20);
+  assert.equal(spec.figures[4].text, 'Hi there');
+  assert.equal(spec.frames[0].poses.title.opacity, 0);
+  assert.equal(spec.frames[1].poses.title.opacity, 1);
+  assert.ok(Math.abs(spec.frames[0].poses.title.x - 480) > 20, 'centered text is shifted left by half its width');
   assert.deepEqual(spec.frames[1].camera, { x: 100, y: -20, zoom: 1.5, angle: 3 });
   assert.notEqual((await call('render_frame', { ticks: [0] }))[1].data, (await call('render_frame', { ticks: [6] }))[1].data);
   await call('build_animation', spec);

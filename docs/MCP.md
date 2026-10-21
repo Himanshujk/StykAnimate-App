@@ -35,9 +35,9 @@ To change an animation, call `get_animation`, edit the spec and call `build_anim
 ## The spec
 
 - **Canvas:** `width`, `height`, `fps`, `background` (hex), `easing` (`auto`, `linear`, `ease-in`, `ease-out`, `constant`; a frame can override it).
-- **Figures:** `{id, color, thickness}` for a stick figure, `{id, kind: "line", length, color, thickness}` and `{id, kind: "circle", radius, color}` for props. Later figures draw in front.
+- **Figures:** `{id, color, thickness}` for a stick figure, `{id, kind: "line", length, color, thickness}` and `{id, kind: "circle", radius, color}` for props, and `{id, kind: "text", text, fontSize, color, bold, italic, alignment, anchor, outlineWidth, outlineColor}` for words in the bundled Noto Sans. Later figures draw in front.
 - **Frames:** each is a keyframe lasting `duration` ticks (1 tick is 1/fps second), interpolated to the next one by its easing. The final keyframe holds for one tick, so repeat the last pose to hold it. Anything a frame does not mention carries over from the previous frame.
-  - `poses[figureId]`: `x`, `y` (hip or root, canvas pixels), `scale`, `pose` (a library name), `mirror` (flip to face left), `joints` (single angles, applied before mirroring) and `angle` (line props).
+  - `poses[figureId]`: `x`, `y` (hip or root, canvas pixels), `scale`, `pose` (a library name), `mirror` (flip to face left), `joints` (single angles, applied before mirroring) and `angle` (line props) and `opacity` (0 to 1, interpolated, so it fades).
   - `camera`: `x`, `y` (offset of the view center from the canvas center, so 0,0 shows the whole canvas), `zoom` (1 is the full canvas) and `angle` in degrees.
 
 The stick figure is the startup figure "Blue" without its IK controllers, with ten joints: `torso`, `head`, `l_upper_arm`, `l_forearm`, `r_upper_arm`, `r_forearm`, `l_thigh`, `l_shin`, `r_thigh`, `r_shin`. Angles are absolute screen degrees (0 points right, 90 down, -90 up), not relative to the parent joint, and `l_` rests on the screen-right side. Standing feet are 129 px × scale below the hip, so for a ground at `y = G` use hip `y = G - 129 × scale`.
@@ -46,9 +46,13 @@ The pose library (`scripts/mcp-poses.mjs`) holds `stand`, four `walk_*` poses, `
 
 Example: a walk is `walk_contact_a`, `walk_pass_a`, `walk_contact_b`, `walk_pass_b` repeated, 4 ticks each, with `x` advancing about 40 px per frame.
 
+### Text and captions
+
+A text figure's words are fixed, so a caption is one text figure that is hidden with `opacity: 0` and shown with `opacity: 1`; list captions last so they draw in front. A frame with easing `constant` cuts instantly, any other easing fades over the frame's duration. Pose `x` is the left edge of the text block unless `anchor` is `center` or `right`, and `y` is the bottom of the lettering. `alignment` only aligns the lines of a multiline block (`\n`) to each other. Characters outside the bundled font's Latin range are replaced.
+
 ## Limits
 
 - `build_animation` replaces the open document through `editor.load`, so it is not undoable. For undoable in-place edits use `run_js` with `editor.selectFrame(i)` and `editor.transaction(label, frame => …)`. Loaded documents run on the layer sheet, so read the current pose from `editor.selectionFrame`, not `editor.frame` (`get_state` does). Frame add, delete and retime commands do not map cleanly onto the layer sheet, which is why edits go through `get_animation`.
-- Only the built-in figure, line and circle props, flat colors and one canvas background. Figures built in Build mode, text, images, effects and audio are reachable through `run_js` but have no dedicated tool.
+- Only the built-in figure, line, circle and text figures, flat colors and one canvas background. Figures built in Build mode, images, effects and audio are reachable through `run_js` but have no dedicated tool.
 - The editor runs in its own headless Chrome, not in an open desktop window, and the desktop-only video encoders are not used.
 - No authentication: the server is a local stdio process spawned by the agent host.

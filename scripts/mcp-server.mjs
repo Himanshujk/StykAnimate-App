@@ -107,10 +107,18 @@ async function buildInPage({ spec, joints: JOINTS }) {
     aux_code: 0, flags: 0, segment_type: 'line', segment_kind: 'line', color_rgb: rgb(figure.color ?? '#2b2b2b'),
     transparency: 0, visible: true, z_order: 1, ...extra,
   });
-  report.figure_types = figures.map((figure, index) => {
+  const { createTextFigure } = await import('/src/text-authoring.mjs');
+  report.figure_types = [];
+  for (const [index, figure] of figures.entries()) {
     ids.set(figure.id, index + 1);
     let definition;
-    if (figure.kind === 'line') {
+    if (figure.kind === 'text') {
+      definition = await createTextFigure({
+        text: figure.text, fontSize: figure.fontSize ?? 48, bold: figure.bold ?? false, italic: figure.italic ?? false,
+        alignment: figure.alignment ?? 'center', color: rgb(figure.color ?? '#2b2b2b'), lineHeight: figure.lineHeight ?? 1.2,
+        outlineWidth: figure.outlineWidth ?? 0, outlineColor: rgb(figure.outlineColor ?? '#000000'), figureTypeId: index + 1, name: figure.id,
+      });
+    } else if (figure.kind === 'line') {
       definition = { segments: [segment({ length: figure.length ?? 200 }, figure)] };
     } else if (figure.kind === 'circle') {
       definition = { segments: [segment({
@@ -122,12 +130,13 @@ async function buildInPage({ spec, joints: JOINTS }) {
       if (figure.color) for (const part of definition.segments) part.color_rgb = rgb(figure.color);
       if (figure.thickness) for (const part of definition.segments) if (part.thickness > 0) part.thickness = figure.thickness;
     }
-    return { polyfills: [], image_assets: [], text_assets: [], ...definition, figure_type_id: index + 1, name: figure.id, segment_count: definition.segments.length };
-  });
+    report.figure_types.push({ polyfills: [], image_assets: [], text_assets: [], ...definition, figure_type_id: index + 1, name: figure.id, segment_count: definition.segments.length });
+  }
 
-  const state = new Map(figures.map(figure => [figure.id, {
-    x: report.canvas_width / 2, y: report.canvas_height * 0.55, scale: 1,
-    angles: figure.kind === 'line' ? [rad(figure.angle ?? 0)] : figure.kind === 'circle' ? [-Math.PI / 2] : [...restAngles],
+  const state = new Map(figures.map((figure, index) => [figure.id, {
+    x: report.canvas_width / 2, y: report.canvas_height * 0.55, scale: 1, opacity: 1,
+    angles: figure.kind === 'line' ? [rad(figure.angle ?? 0)] : figure.kind === 'circle' ? [-Math.PI / 2]
+      : figure.kind === 'text' ? report.figure_types[index].segments.map(part => part.angle_rad) : [...restAngles],
   }]));
   // The native camera is an offset of the view's center from the canvas center, with scale as zoom.
   const camera = { x: 0, y: 0, zoom: 1, angle: 0, used: false };
@@ -143,6 +152,7 @@ async function buildInPage({ spec, joints: JOINTS }) {
       if (pose.x !== undefined) current.x = pose.x;
       if (pose.y !== undefined) current.y = pose.y;
       if (pose.scale !== undefined) current.scale = pose.scale;
+      if (pose.opacity !== undefined) current.opacity = Math.min(1, Math.max(0, pose.opacity));
       if (pose.angle !== undefined) {
         if (figure.kind !== 'line') throw new Error(`Frame ${frameIndex}: "angle" only applies to line figures (${figure.id})`);
         current.angles[0] = rad(pose.angle);
@@ -153,8 +163,10 @@ async function buildInPage({ spec, joints: JOINTS }) {
         if (slot < 0) throw new Error(`Frame ${frameIndex}: unknown joint "${joint}". Joints: ${JOINTS.join(', ')}`);
         current.angles[slot] = rad(degrees);
       }
-      const object = createObject(report.figure_types[index], index + 1, current.x, current.y);
+      const shift = figure.kind === 'text' ? (figure.anchor === 'center' ? 0.5 : figure.anchor === 'right' ? 1 : 0) * report.figure_types[index].segments[0].length * current.scale : 0;
+      const object = createObject(report.figure_types[index], index + 1, current.x - shift, current.y);
       object.scale = current.scale;
+      object.field28 = Math.round(255 * (1 - current.opacity)); // native opacity is stored as transparency 0-255
       object.angles = [...current.angles];
       return object;
     });
@@ -204,12 +216,21 @@ const readStateInPage = JOINTS => {
 };
 
 /** Runs in the page. Reads the live document back as a build_animation spec (values equal to the previous frame are omitted). */
-function readAnimationInPage(JOINTS) {
+async function readAnimationInPage(JOINTS) {
+  const { readTextFigureOptions } = await import('/src/native-text-authoring.mjs');
   const { editor } = window.styk;
   const report = editor.report, saved = { frame: editor.frameIndex, tick: editor.tick };
   const hex = rgb => `#${rgb.map(value => value.toString(16).padStart(2, '0')).join('')}`;
   const round = value => Math.round(value * 10) / 10;
-  const kindOf = figure => figure.segments.length !== 1 ? 'stick' : figure.segments[0].segment_kind === 'circleFill' ? 'circle' : 'line';
+  const kindOf = figure => figure.segments.length !== 1 ? 'stick' : figure.segments[0].segment_kind === 'circleFill' ? 'circle' : figure.segments[0].segment_kind === 'text' ? 'text' : 'line';
+  const textFields = figure => {
+    const options = readTextFigureOptions(figure);
+    return {
+      text: options.text, fontSize: options.fontSize, ...(options.bold ? { bold: true } : {}), ...(options.italic ? { italic: true } : {}),
+      alignment: options.alignment, lineHeight: options.lineHeight,
+      ...(options.outlineWidth ? { outlineWidth: options.outlineWidth, outlineColor: hex(options.outlineColor) } : {}),
+    };
+  };
   const figures = report.figure_types.map(figure => {
     const kind = kindOf(figure), segment = figure.segments[0];
     return {
@@ -218,6 +239,7 @@ function readAnimationInPage(JOINTS) {
       ...(segment?.color_rgb ? { color: hex(segment.color_rgb) } : {}),
       ...(kind === 'line' ? { length: segment.length, thickness: segment.thickness } : {}),
       ...(kind === 'circle' ? { radius: segment.length / 2 } : {}),
+      ...(kind === 'text' ? textFields(figure) : {}),
     };
   });
   const background = report.backgrounds?.find(item => item.kind === 2);
@@ -229,12 +251,12 @@ function readAnimationInPage(JOINTS) {
     for (const object of editor.selectionFrame.objects) {
       const figure = report.figure_types.find(item => item.figure_type_id === object.figure_type_id), name = figure?.name;
       const kind = kindOf(figure);
-      const now = { x: round(object.root_x), y: round(object.root_y), scale: round(object.scale), joints: {} };
+      const now = { x: round(object.root_x), y: round(object.root_y), scale: round(object.scale), opacity: Math.round((1 - (object.field28 ?? 0) / 255) * 100) / 100, joints: {} };
       if (kind === 'stick') JOINTS.forEach((joint, slot) => { now.joints[joint] = round(object.angles[slot] * 180 / Math.PI); });
       else if (kind === 'line') now.angle = round(object.angles[0] * 180 / Math.PI);
       const last = previous.get(name);
       const pose = {};
-      for (const key of ['x', 'y', 'scale', 'angle']) if (key in now && (!last || last[key] !== now[key])) pose[key] = now[key];
+      for (const key of ['x', 'y', 'scale', 'opacity', 'angle']) if (key in now && (!last || last[key] !== now[key])) pose[key] = now[key];
       const joints = Object.fromEntries(Object.keys(now.joints).filter(joint => !last || last.joints[joint] !== now.joints[joint]).map(joint => [joint, now.joints[joint]]));
       if (Object.keys(joints).length) pose.joints = joints;
       previous.set(name, now);
@@ -276,6 +298,7 @@ const tools = [
       'Rest pose: torso -90, head -90, l_upper_arm 60, l_forearm 76, r_upper_arm 120, r_forearm 104, l_thigh 64, l_shin 87, r_thigh 116, r_shin 93.',
       'A figure not mentioned in a frame, or a joint/x/y/scale not mentioned, keeps its value from the previous frame. x,y is the hip/root position in canvas pixels; standing feet are 129 px x scale below the hip (so hip y = ground y - 129 x scale), the head top about 122 px x scale above it.',
       'Figures are stick figures by default; kind "line" (length, angle in degrees, set per frame with pose.angle) and kind "circle" (radius) make props such as a ground line or a ball, positioned by x,y (a line starts at x,y, a circle is centered there). Figures listed later draw in front.',
+      'Kind "text" (text, fontSize, color, bold, italic, alignment, anchor) draws words in the bundled Noto Sans. Pose x is the left edge of the block unless anchor is "center" or "right", and y is the bottom of the lettering. Text cannot change, so make one text figure per caption and show it with pose.opacity (0 hides, 1 shows; a frame with easing "constant" cuts instantly, other easings fade). List captions last so they draw in front.',
       'A frame may set `camera` {x, y, zoom, angle}: x,y shift the view center from the canvas center in pixels (0,0 shows the whole canvas, positive x looks right), zoom 1 is the full canvas, 2 is twice as close, angle in degrees. Camera values also carry over.',
     ].join(' '),
     inputSchema: {
@@ -293,12 +316,19 @@ const tools = [
             type: 'object',
             properties: {
               id: { type: 'string' },
-              kind: { type: 'string', enum: ['stick', 'line', 'circle'], description: 'Default stick.' },
+              kind: { type: 'string', enum: ['stick', 'line', 'circle', 'text'], description: 'Default stick.' },
               color: { type: 'string', description: 'Hex color, e.g. "#e63946".' },
               thickness: { type: 'number' },
               length: { type: 'number', description: 'line: length in pixels.' },
               angle: { type: 'number', description: 'line: starting angle in degrees (0 = right).' },
               radius: { type: 'number', description: 'circle: radius in pixels.' },
+              text: { type: 'string', description: 'text: the words; \\n starts a new line. A text figure never changes its words, so use one figure per caption.' },
+              fontSize: { type: 'number', description: 'text: size in pixels, default 48.' },
+              bold: { type: 'boolean' }, italic: { type: 'boolean' },
+              alignment: { type: 'string', enum: ['left', 'center', 'right'], description: 'text: alignment of lines within a multiline block, default center.' },
+              anchor: { type: 'string', enum: ['left', 'center', 'right'], description: 'text: which point of the block pose x refers to, default left.' },
+              lineHeight: { type: 'number' },
+              outlineWidth: { type: 'number' }, outlineColor: { type: 'string' },
             },
             required: ['id'],
           },
@@ -324,6 +354,7 @@ const tools = [
                     mirror: { type: 'boolean' },
                     x: { type: 'number' }, y: { type: 'number' }, scale: { type: 'number' },
                     angle: { type: 'number', description: 'line figures only: angle in degrees.' },
+                    opacity: { type: 'number', description: '0 (invisible) to 1, default 1; interpolates, so it fades.' },
                     joints: { type: 'object', additionalProperties: { type: 'number' } },
                   },
                 },
