@@ -101,26 +101,53 @@ async function buildInPage({ spec, joints: JOINTS }) {
 
   const figures = spec.figures?.length ? spec.figures : [{ id: 'figure' }];
   const ids = new Map();
+  // A prop is a single segment: a line (length, angle) or a filled circle (radius = length / 2).
+  const segment = (extra, figure) => ({
+    segment_id: 1, parent_id: 0, length: 100, angle_rad: 0, thickness: figure.thickness ?? 8, bend_rad: 0, primitive_code: 0,
+    aux_code: 0, flags: 0, segment_type: 'line', segment_kind: 'line', color_rgb: rgb(figure.color ?? '#2b2b2b'),
+    transparency: 0, visible: true, z_order: 1, ...extra,
+  });
   report.figure_types = figures.map((figure, index) => {
     ids.set(figure.id, index + 1);
-    const definition = structuredClone(base);
-    definition.figure_type_id = index + 1;
-    definition.name = figure.id;
-    if (figure.color) for (const segment of definition.segments) segment.color_rgb = rgb(figure.color);
-    if (figure.thickness) for (const segment of definition.segments) if (segment.thickness > 0) segment.thickness = figure.thickness;
-    return definition;
+    let definition;
+    if (figure.kind === 'line') {
+      definition = { segments: [segment({ length: figure.length ?? 200 }, figure)] };
+    } else if (figure.kind === 'circle') {
+      definition = { segments: [segment({
+        length: (figure.radius ?? 20) * 2, angle_rad: -Math.PI / 2, thickness: 0, primitive_code: 3, flags: 3,
+        segment_type: 'circle', segment_kind: 'circleFill',
+      }, figure)] };
+    } else {
+      definition = structuredClone(base);
+      if (figure.color) for (const part of definition.segments) part.color_rgb = rgb(figure.color);
+      if (figure.thickness) for (const part of definition.segments) if (part.thickness > 0) part.thickness = figure.thickness;
+    }
+    return { polyfills: [], image_assets: [], text_assets: [], ...definition, figure_type_id: index + 1, name: figure.id, segment_count: definition.segments.length };
   });
 
   const state = new Map(figures.map(figure => [figure.id, {
-    x: report.canvas_width / 2, y: report.canvas_height * 0.55, scale: 1, angles: [...restAngles],
+    x: report.canvas_width / 2, y: report.canvas_height * 0.55, scale: 1,
+    angles: figure.kind === 'line' ? [rad(figure.angle ?? 0)] : figure.kind === 'circle' ? [-Math.PI / 2] : [...restAngles],
   }]));
+  // The native camera is an offset of the view's center from the canvas center, with scale as zoom.
+  const camera = { x: 0, y: 0, zoom: 1, angle: 0, used: false };
   report.keyframes = spec.frames.map((frame, frameIndex) => {
+    for (const [name, value] of Object.entries(frame.camera ?? {})) {
+      if (!(name in camera) || name === 'used') throw new Error(`Frame ${frameIndex}: unknown camera field "${name}". Fields: x, y, zoom, angle`);
+      camera[name] = value;
+      camera.used = true;
+    }
     const objects = figures.map((figure, index) => {
       const pose = frame.poses?.[figure.id] ?? {};
       const current = state.get(figure.id);
       if (pose.x !== undefined) current.x = pose.x;
       if (pose.y !== undefined) current.y = pose.y;
       if (pose.scale !== undefined) current.scale = pose.scale;
+      if (pose.angle !== undefined) {
+        if (figure.kind !== 'line') throw new Error(`Frame ${frameIndex}: "angle" only applies to line figures (${figure.id})`);
+        current.angles[0] = rad(pose.angle);
+      }
+      if (figure.kind && figure.kind !== 'stick' && Object.keys(pose.joints ?? {}).length) throw new Error(`Frame ${frameIndex}: ${figure.kind} figure "${figure.id}" has no joints`);
       for (const [joint, degrees] of Object.entries(pose.joints ?? {})) {
         const slot = JOINTS.indexOf(joint);
         if (slot < 0) throw new Error(`Frame ${frameIndex}: unknown joint "${joint}". Joints: ${JOINTS.join(', ')}`);
@@ -132,6 +159,7 @@ async function buildInPage({ spec, joints: JOINTS }) {
       return object;
     });
     const key = createFrame(objects, Math.max(1, Math.round(frame.duration ?? 6)));
+    if (camera.used) key.camera = { is_default: false, x: camera.x, y: camera.y, scale: camera.zoom, angle_rad: rad(camera.angle) };
     if (spec.background) key.background_id = 1;
     key._styk = { easing: { interpolation: frame.easing ?? spec.easing ?? 'auto' } };
     return key;
@@ -170,7 +198,7 @@ const readStateInPage = JOINTS => {
     currentFrame: editor.selectionFrame.objects.map(object => ({
       figure: editor.report.figure_types.find(figure => figure.figure_type_id === object.figure_type_id)?.name,
       x: object.root_x, y: object.root_y, scale: object.scale,
-      joints: Object.fromEntries(object.angles.slice(0, JOINTS.length).map((angle, i) => [JOINTS[i], +(angle * 180 / Math.PI).toFixed(1)])),
+      joints: Object.fromEntries(object.angles.map((angle, i) => [object.angles.length === JOINTS.length ? JOINTS[i] : `angle${i}`, +(angle * 180 / Math.PI).toFixed(1)])),
     })),
   };
 };
@@ -181,30 +209,46 @@ function readAnimationInPage(JOINTS) {
   const report = editor.report, saved = { frame: editor.frameIndex, tick: editor.tick };
   const hex = rgb => `#${rgb.map(value => value.toString(16).padStart(2, '0')).join('')}`;
   const round = value => Math.round(value * 10) / 10;
-  const figures = report.figure_types.map(figure => ({
-    id: figure.name,
-    ...(figure.segments[0]?.color_rgb ? { color: hex(figure.segments[0].color_rgb) } : {}),
-  }));
+  const kindOf = figure => figure.segments.length !== 1 ? 'stick' : figure.segments[0].segment_kind === 'circleFill' ? 'circle' : 'line';
+  const figures = report.figure_types.map(figure => {
+    const kind = kindOf(figure), segment = figure.segments[0];
+    return {
+      id: figure.name,
+      ...(kind === 'stick' ? {} : { kind }),
+      ...(segment?.color_rgb ? { color: hex(segment.color_rgb) } : {}),
+      ...(kind === 'line' ? { length: segment.length, thickness: segment.thickness } : {}),
+      ...(kind === 'circle' ? { radius: segment.length / 2 } : {}),
+    };
+  });
   const background = report.backgrounds?.find(item => item.kind === 2);
   const previous = new Map();
+  let lastCamera = { x: 0, y: 0, zoom: 1, angle: 0 };
   const frames = editor.timeline.map((entry, index) => {
     editor.selectFrame(index);
     const poses = {};
     for (const object of editor.selectionFrame.objects) {
-      const name = report.figure_types.find(figure => figure.figure_type_id === object.figure_type_id)?.name;
+      const figure = report.figure_types.find(item => item.figure_type_id === object.figure_type_id), name = figure?.name;
+      const kind = kindOf(figure);
       const now = { x: round(object.root_x), y: round(object.root_y), scale: round(object.scale), joints: {} };
-      JOINTS.forEach((joint, slot) => { now.joints[joint] = round(object.angles[slot] * 180 / Math.PI); });
+      if (kind === 'stick') JOINTS.forEach((joint, slot) => { now.joints[joint] = round(object.angles[slot] * 180 / Math.PI); });
+      else if (kind === 'line') now.angle = round(object.angles[0] * 180 / Math.PI);
       const last = previous.get(name);
       const pose = {};
-      for (const key of ['x', 'y', 'scale']) if (!last || last[key] !== now[key]) pose[key] = now[key];
-      const joints = Object.fromEntries(JOINTS.filter(joint => !last || last.joints[joint] !== now.joints[joint]).map(joint => [joint, now.joints[joint]]));
+      for (const key of ['x', 'y', 'scale', 'angle']) if (key in now && (!last || last[key] !== now[key])) pose[key] = now[key];
+      const joints = Object.fromEntries(Object.keys(now.joints).filter(joint => !last || last.joints[joint] !== now.joints[joint]).map(joint => [joint, now.joints[joint]]));
       if (Object.keys(joints).length) pose.joints = joints;
       previous.set(name, now);
       if (Object.keys(pose).length) poses[name] = pose;
     }
+    const native = editor.selectionFrame.camera;
+    const camera = native && !native.is_default
+      ? { x: round(native.x), y: round(native.y), zoom: round(native.scale), angle: round((native.angle_rad ?? 0) * 180 / Math.PI) } : lastCamera;
+    const cameraChange = Object.fromEntries(Object.keys(camera).filter(key => camera[key] !== lastCamera[key]).map(key => [key, camera[key]]));
+    lastCamera = camera;
     return {
       duration: entry.count,
       easing: report.keyframes[index]?._styk?.easing?.interpolation ?? 'auto',
+      ...(Object.keys(cameraChange).length ? { camera: cameraChange } : {}),
       ...(Object.keys(poses).length ? { poses } : {}),
     };
   });
@@ -230,7 +274,9 @@ const tools = [
       'Angles are absolute degrees on screen: 0 = pointing right, 90 = pointing down, 180 = left, -90 = up. y grows downward.',
       'Joints: torso, head, l_upper_arm, l_forearm, r_upper_arm, r_forearm, l_thigh, l_shin, r_thigh, r_shin (each limb angle is absolute, not relative to its parent; "l_" rests on the screen-right side, "r_" on the screen-left).',
       'Rest pose: torso -90, head -90, l_upper_arm 60, l_forearm 76, r_upper_arm 120, r_forearm 104, l_thigh 64, l_shin 87, r_thigh 116, r_shin 93.',
-      'A figure not mentioned in a frame, or a joint/x/y/scale not mentioned, keeps its value from the previous frame. x,y is the hip/root position in canvas pixels.',
+      'A figure not mentioned in a frame, or a joint/x/y/scale not mentioned, keeps its value from the previous frame. x,y is the hip/root position in canvas pixels; standing feet are 129 px x scale below the hip (so hip y = ground y - 129 x scale), the head top about 122 px x scale above it.',
+      'Figures are stick figures by default; kind "line" (length, angle in degrees, set per frame with pose.angle) and kind "circle" (radius) make props such as a ground line or a ball, positioned by x,y (a line starts at x,y, a circle is centered there). Figures listed later draw in front.',
+      'A frame may set `camera` {x, y, zoom, angle}: x,y shift the view center from the canvas center in pixels (0,0 shows the whole canvas, positive x looks right), zoom 1 is the full canvas, 2 is twice as close, angle in degrees. Camera values also carry over.',
     ].join(' '),
     inputSchema: {
       type: 'object',
@@ -243,7 +289,19 @@ const tools = [
         easing: { type: 'string', enum: ['auto', 'linear', 'ease-in', 'ease-out', 'constant'], description: 'Default interpolation to the next keyframe.' },
         figures: {
           type: 'array',
-          items: { type: 'object', properties: { id: { type: 'string' }, color: { type: 'string', description: 'Hex color, e.g. "#e63946".' }, thickness: { type: 'number' } }, required: ['id'] },
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              kind: { type: 'string', enum: ['stick', 'line', 'circle'], description: 'Default stick.' },
+              color: { type: 'string', description: 'Hex color, e.g. "#e63946".' },
+              thickness: { type: 'number' },
+              length: { type: 'number', description: 'line: length in pixels.' },
+              angle: { type: 'number', description: 'line: starting angle in degrees (0 = right).' },
+              radius: { type: 'number', description: 'circle: radius in pixels.' },
+            },
+            required: ['id'],
+          },
         },
         frames: {
           type: 'array',
@@ -251,6 +309,10 @@ const tools = [
             type: 'object',
             properties: {
               duration: { type: 'integer', description: 'Ticks until the next keyframe (>=1), default 6.' },
+              camera: {
+                type: 'object',
+                properties: { x: { type: 'number' }, y: { type: 'number' }, zoom: { type: 'number' }, angle: { type: 'number' } },
+              },
               easing: { type: 'string', enum: ['auto', 'linear', 'ease-in', 'ease-out', 'constant'] },
               poses: {
                 type: 'object',
@@ -261,6 +323,7 @@ const tools = [
                     pose: { type: 'string', enum: Object.keys(POSES) },
                     mirror: { type: 'boolean' },
                     x: { type: 'number' }, y: { type: 'number' }, scale: { type: 'number' },
+                    angle: { type: 'number', description: 'line figures only: angle in degrees.' },
                     joints: { type: 'object', additionalProperties: { type: 'number' } },
                   },
                 },

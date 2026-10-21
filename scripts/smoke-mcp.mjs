@@ -72,26 +72,32 @@ try {
 
   // Named poses and mirroring build, and get_animation reads a document back to an equal spec.
   const posed = json(await call('build_animation', {
-    name: 'poses', background: '#ffffff', figures: [{ id: 'a', color: '#0d99ff' }, { id: 'b', color: '#e63946' }],
+    name: 'poses', background: '#ffffff',
+    figures: [{ id: 'ground', kind: 'line', length: 900, color: '#555555' }, { id: 'ball', kind: 'circle', radius: 20, color: '#f0a547' },
+      { id: 'a', color: '#0d99ff' }, { id: 'b', color: '#e63946' }],
     frames: [
-      { duration: 6, poses: { a: { pose: 'walk_contact_a', x: 200 }, b: { pose: 'walk_contact_a', mirror: true, x: 700 } } },
-      { duration: 6, poses: { a: { pose: 'walk_contact_b', x: 260 }, b: { pose: 'walk_contact_b', mirror: true, x: 640 } } },
+      { duration: 6, poses: { ground: { x: 30, y: 420, angle: 0 }, ball: { x: 480, y: 400 }, a: { pose: 'walk_contact_a', x: 200 }, b: { pose: 'walk_contact_a', mirror: true, x: 700 } } },
+      { duration: 6, camera: { x: 100, y: -20, zoom: 1.5, angle: 3 }, poses: { ball: { x: 520 }, a: { pose: 'walk_contact_b', x: 260 }, b: { pose: 'walk_contact_b', mirror: true, x: 640 } } },
       { duration: 1 },
     ],
   }));
   assert.equal(posed.ticks, 13);
   const spec = json(await call('get_animation'));
   assert.equal(spec.frames.length, 3);
-  assert.equal(spec.figures[1].color, '#e63946');
+  assert.equal(spec.figures[3].color, '#e63946');
+  assert.equal(spec.figures[1].radius, 20);
+  assert.deepEqual(spec.frames[1].camera, { x: 100, y: -20, zoom: 1.5, angle: 3 });
+  assert.notEqual((await call('render_frame', { ticks: [0] }))[1].data, (await call('render_frame', { ticks: [6] }))[1].data);
   await call('build_animation', spec);
   assert.deepEqual(json(await call('get_animation')), spec, 'get_animation output survives a rebuild unchanged');
   assert.ok(Object.keys(json(await call('list_poses'))).includes('punch'));
 
   // An in-place edit shows in get_state and undoes.
-  await call('run_js', { code: 'const e = window.styk.editor; e.selectFrame(0); e.transaction("smoke", f => { f.objects[0].root_x = 123; });' });
-  assert.equal(json(await call('get_state')).currentFrame[0].x, 123);
+  await call('run_js', { code: 'const e = window.styk.editor; e.selectFrame(0); e.transaction("smoke", f => { f.objects[2].root_x = 123; });' });
+  const hero = async () => json(await call('get_state')).currentFrame.find(item => item.figure === 'a');
+  assert.equal((await hero()).x, 123);
   await call('run_js', { code: 'window.styk.editor.undo();' });
-  assert.equal(json(await call('get_state')).currentFrame[0].x, 200);
+  assert.equal((await hero()).x, 200);
   console.log(`MCP smoke passed; files in ${output}`);
 } finally {
   child.stdin.end();
